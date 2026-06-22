@@ -1,0 +1,6 @@
+{
+  "name": "DASHBOARD KALKULATOR WD PENDING",
+  "description": "Membantu operator melihat total transaksi Withdraw yang berstatus 'wait for payment' secara otomatis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
