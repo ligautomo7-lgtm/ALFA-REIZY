@@ -87,7 +87,7 @@ export default function PasteSection({ onParse, isLoading = false }: PasteSectio
       <div className="flex items-center justify-between mb-4">
         <label htmlFor="raw-pasted-data" className="flex items-center gap-2 font-display text-base font-extrabold text-white">
           <ClipboardCopy className="h-4.5 w-4.5 text-blue-400" />
-          Tempel Data Transaksi Baru (Withdraw Operate)
+          Tempel Data Transaksi Baru (Withdraw Operate PENDING)
         </label>
         
         <button

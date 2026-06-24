@@ -3,459 +3,549 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useTransition } from 'react';
 import { 
   ClipboardCheck, Copy, Check, Trash2, Sparkles, CornerDownRight, 
-  Landmark, CreditCard, User, Users, DollarSign, Info
+  FileSpreadsheet, Info, Download, Upload, AlertCircle
 } from 'lucide-react';
 
 interface WrongExtractorProps {
   onToast: (type: 'success' | 'info', message: string) => void;
 }
 
+interface ParsedRow {
+  bank: string;
+  accountNumber: string;
+  userId: string;
+  accountName: string;
+  nominal: string;
+}
+
 export default function WrongExtractor({ onToast }: WrongExtractorProps) {
-  // Input raw state
+  // Input raw pasted text state
   const [inputText, setInputText] = useState('');
+  
+  // High-performance parsed list state (can easily support thousands of lines)
+  const [parsedRows, setParsedRows] = useState<ParsedRow[]>([]);
+  
+  // Transition state to keep input feeling instant even with 2000+ lines
+  const [isPending, startTransition] = useTransition();
 
-  // 5 Kolom Terpisah States (allows manual edits too!)
-  const [bank, setBank] = useState('');
-  const [accountNumber, setAccountNumber] = useState('');
-  const [username, setUsername] = useState('');
-  const [fullName, setFullName] = useState('');
-  const [amountVal, setAmountVal] = useState('');
+  // Active feedback indicators
+  const [copiedCell, setCopiedCell] = useState<{ row: number; col: number } | null>(null);
+  const [copiedColumn, setCopiedColumn] = useState<string | null>(null);
+  const [copiedAll, setCopiedAll] = useState(false);
 
-  // UI state for individual copied checkmarks
-  const [copiedField, setCopiedField] = useState<string | null>(null);
+  // Core smart parsing engine designed to automatically split tab/spaces/extra enter strings
+  const parseRawLines = (rawText: string): ParsedRow[] => {
+    if (!rawText.trim()) return [];
 
-  // Refs for auto-selecting input elements on-click
-  const bankRef = useRef<HTMLInputElement>(null);
-  const accNumRef = useRef<HTMLInputElement>(null);
-  const userRef = useRef<HTMLInputElement>(null);
-  const nameRef = useRef<HTMLInputElement>(null);
-  const amountRef = useRef<HTMLInputElement>(null);
-
-  const formatIDRICOMMA = (val: number) => {
-    if (isNaN(val)) return 'Rp 0';
-    const formatted = new Intl.NumberFormat('en-US', {
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0
-    }).format(Math.round(val));
-    return `Rp ${formatted}`;
-  };
-
-  // Automated split parser upon pasting
-  const handleParse = (text: string) => {
-    if (!text.trim()) {
-      setBank('');
-      setAccountNumber('');
-      setUsername('');
-      setFullName('');
-      setAmountVal('');
-      return;
-    }
-
-    const lines = text.trim().split('\n');
-    const line = lines[0]; // operate on first line pasted
-
-    // Excel/spreadsheet tabs split
-    const tabParts = line.split('\t').map(x => x.trim());
-    const visibleTokens = tabParts.filter(Boolean);
-
-    let parsedBank = '';
-    let parsedAccNum = '';
-    let parsedUser = '';
-    let parsedName = '';
-    let parsedAmount = 0;
+    // Split by newlines and exclude completely empty lines
+    const rawLines = rawText.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const list: ParsedRow[] = [];
 
     const bankKeywords = [
       'BCA', 'BRI', 'BNI', 'MANDIRI', 'DANA', 'GOPAY', 'OVO', 'LINKAJA', 'SPAY', 
       'SHOPEEPAY', 'CIMB', 'DANAMON', 'SEABANK', 'BSI', 'PERMATA', 'PANIN', 'OCBC', 'BNC', 'NEO'
     ];
 
-    // If it's a spreadsheet line with at least 5-6 non-empty elements
-    if (visibleTokens.length >= 6) {
-      parsedUser = visibleTokens[1] || '';
-      parsedName = visibleTokens[2] || '';
-      parsedAccNum = visibleTokens[3] || '';
-      parsedBank = visibleTokens[4] || '';
-
-      // Find amount towards the end of line
-      for (let i = visibleTokens.length - 1; i >= 5; i--) {
-        const tok = visibleTokens[i];
-        if (tok === 'wrong') continue;
-        const cleanNum = tok.replace(/,/g, '');
-        const parsed = parseFloat(cleanNum);
-        if (!isNaN(parsed) && parsed > 500 && tok !== parsedAccNum && !tok.includes('-')) {
-          parsedAmount = Math.round(parsed);
-          break;
-        }
-      }
-    } else {
-      // Heuristic parsing for mixed spaces formatting
-      const tokens = line.split(/\s+/).map(x => x.trim()).filter(Boolean);
+    for (let i = 0; i < rawLines.length; i++) {
+      const line = rawLines[i];
       
-      // 1. Bank
-      const foundBank = tokens.find(t => bankKeywords.includes(t.toUpperCase()));
-      if (foundBank) parsedBank = foundBank.toUpperCase();
+      // Let's first try tab separation (common from Spreadsheet copy-paste)
+      const tabParts = line.split('\t').map(x => x.trim()).filter(Boolean);
+      
+      let bank = '';
+      let accountNumber = '';
+      let userId = '';
+      let accountName = '';
+      let nominalStr = '';
 
-      // 2. Account Number (typically digits between 8-25 chars)
-      const foundAcc = tokens.find(t => /^\d{8,25}$/.test(t));
-      if (foundAcc) parsedAccNum = foundAcc;
+      // If it looks like a rich system export tab line (e.g., has WRONG keyword or > 6 elements)
+      if (tabParts.length >= 6) {
+        userId = tabParts[1] || '';
+        accountName = tabParts[2] || '';
+        accountNumber = tabParts[3] || '';
+        bank = tabParts[4] || '';
 
-      // 3. Amount/Nominal
-      const foundAmount = tokens.find(t => {
-        const clean = t.replace(/,/g, '');
-        const num = parseFloat(clean);
-        return !isNaN(num) && num > 500 && t !== foundAcc && !t.includes('-');
-      });
-      if (foundAmount) {
-        const clean = foundAmount.replace(/,/g, '');
-        parsedAmount = Math.round(parseFloat(clean));
-      }
-
-      // 4. Username (usually lowercase alphanumeric, between 3-20 chars)
-      const foundUser = tokens.find(t => /^[a-z0-9_]{3,20}$/.test(t) && t.toUpperCase() !== parsedBank);
-      if (foundUser) parsedUser = foundUser;
-
-      // 5. Full Name (alphabetical words positioned in between username and account number)
-      const userIdx = tokens.indexOf(parsedUser);
-      const accIdx = tokens.indexOf(parsedAccNum);
-      if (userIdx !== -1 && accIdx !== -1 && accIdx > userIdx + 1) {
-        parsedName = tokens.slice(userIdx + 1, accIdx).join(' ');
+        // Extract amount towards the end
+        for (let j = tabParts.length - 1; j >= 5; j--) {
+          const tok = tabParts[j];
+          if (tok.toLowerCase() === 'wrong') continue;
+          const cleanNum = tok.replace(/,/g, '').replace(/Rp/g, '').trim();
+          const parsed = parseFloat(cleanNum);
+          if (!isNaN(parsed) && parsed > 500 && tok !== accountNumber && !tok.includes('-')) {
+            nominalStr = String(Math.round(parsed));
+            break;
+          }
+        }
       } else {
-        // Fallback names if indices are scrambled
-        const nameTokens = tokens.filter(t => 
-          /^[A-Za-z]+$/.test(t) && 
-          t.toUpperCase() !== parsedBank && 
-          t !== parsedUser && 
-          t.toLowerCase() !== 'wrong' &&
-          t.toLowerCase() !== 'error' &&
-          t.toLowerCase() !== 'withdraw'
-        );
-        if (nameTokens.length > 0) {
-          parsedName = nameTokens.join(' ');
+        // Fallback space-separated parsing with multiple spaces/tab normalizing
+        const tokens = line.split(/\s+/).map(x => x.trim()).filter(Boolean);
+        
+        if (tokens.length > 0) {
+          // 1. Identify Bank from keywords
+          const foundBank = tokens.find(t => bankKeywords.includes(t.toUpperCase()));
+          if (foundBank) {
+            bank = foundBank.toUpperCase();
+          }
+
+          // 2. Identify Account Number (digits of 8 to 25 chars)
+          const foundAcc = tokens.find(t => /^\d{8,25}$/.test(t));
+          if (foundAcc) {
+            accountNumber = foundAcc;
+          }
+
+          // 3. Identify Nominal (typically numeric at the end or following patterns)
+          // Look for numeric token which is not the account number
+          const foundNominal = tokens.find(t => {
+            const clean = t.replace(/,/g, '').replace(/Rp/g, '').trim();
+            const num = parseFloat(clean);
+            return !isNaN(num) && num > 500 && t !== foundAcc && !t.includes('-');
+          });
+          if (foundNominal) {
+            nominalStr = foundNominal.replace(/,/g, '').replace(/Rp/g, '').trim();
+          }
+
+          // 4. Identify User ID
+          const foundUser = tokens.find(t => /^[a-z0-9_]{3,20}$/.test(t) && t.toUpperCase() !== bank);
+          if (foundUser) {
+            userId = foundUser;
+          }
+
+          // 5. Gather remaining string fragments as Account Name
+          const userIdx = tokens.indexOf(userId);
+          const accIdx = tokens.indexOf(accountNumber);
+          if (userIdx !== -1 && accIdx !== -1 && accIdx > userIdx + 1) {
+            accountName = tokens.slice(userIdx + 1, accIdx).join(' ');
+          } else {
+            // Filter tokens to exclude already parsed bank, account number, nominal, userid, or wrong keywords
+            const nameTokens = tokens.filter(t => {
+              const upper = t.toUpperCase();
+              const lower = t.toLowerCase();
+              return (
+                !bankKeywords.includes(upper) &&
+                t !== accountNumber &&
+                t !== nominalStr &&
+                t !== userId &&
+                lower !== 'wrong' &&
+                lower !== 'error' &&
+                lower !== 'withdraw' &&
+                !/^\d+$/.test(t)
+              );
+            });
+            if (nameTokens.length > 0) {
+              accountName = nameTokens.join(' ');
+            }
+          }
         }
       }
+
+      // Default values for missing pieces
+      list.push({
+        bank: bank || 'TIDAK TERDETEKSI',
+        accountNumber: accountNumber || 'TIDAK TERDETEKSI',
+        userId: userId || 'TIDAK TERDETEKSI',
+        accountName: accountName || 'TIDAK TERDETEKSI',
+        nominal: nominalStr || '0'
+      });
     }
 
-    setBank(parsedBank || 'TIDAK TERDETEKSI');
-    setAccountNumber(parsedAccNum || 'TIDAK TERDETEKSI');
-    setUsername(parsedUser || 'TIDAK TERDETEKSI');
-    setFullName(parsedName || 'TIDAK TERDETEKSI');
-    setAmountVal(parsedAmount ? String(parsedAmount) : '0');
+    return list;
   };
 
+  // Perform parse with concurrent transitions to handle thousands of lines instantly without locking the browser UI
   useEffect(() => {
-    handleParse(inputText);
+    startTransition(() => {
+      const parsed = parseRawLines(inputText);
+      setParsedRows(parsed);
+    });
   }, [inputText]);
 
-  // Handles copying a specified value and animating UI
-  const handleCopyValue = (val: string, fieldName: string) => {
-    if (!val || val === 'TIDAK TERDETEKSI' || val === '0') {
-      onToast('info', `Gagal menyalin: data ${fieldName} kosong atau belum terisi`);
-      return;
-    }
+  // Click handler to instantly copy an individual cell's content
+  const handleCellClickAndCopy = (rowIdx: number, colIdx: number, val: string) => {
+    if (!val || val === 'TIDAK TERDETEKSI' || val === '0' || val.trim() === '') return;
+
     navigator.clipboard.writeText(val)
       .then(() => {
-        onToast('success', `${fieldName} berhasil disalin ke clipboard!`);
-        setCopiedField(fieldName);
-        setTimeout(() => setCopiedField(null), 2000);
+        onToast('success', `Berhasil disalin: "${val}"`);
+        setCopiedCell({ row: rowIdx, col: colIdx });
+        setTimeout(() => setCopiedCell(null), 1000);
       })
       .catch(() => {
-        onToast('info', 'Gagal menyalin ke clipboard.');
+        onToast('info', 'Gagal menyalin');
       });
   };
 
-  // Helper when clicking or focusing on any input to trigger automatic select & instant copy
-  const handleInputFocusSelect = (e: React.FocusEvent<HTMLInputElement>, fieldName: string, value: string) => {
-    e.target.select();
-    if (value && value !== 'TIDAK TERDETEKSI' && value !== '0') {
-      navigator.clipboard.writeText(value)
-        .then(() => {
-          onToast('success', `${fieldName} tersalin otomatis!`);
-          setCopiedField(fieldName);
-          setTimeout(() => setCopiedField(null), 1500);
-        });
+  // Bulk copy entire contents of a single column (vertical list separated by newlines)
+  const handleCopyColumn = (colKey: keyof ParsedRow, friendlyName: string) => {
+    if (parsedRows.length === 0) {
+      onToast('info', `Kolom ${friendlyName} kosong. Silakan masukkan data terlebih dahulu.`);
+      return;
     }
-  };
 
-  const handleCopyFormattedGroup = () => {
-    const numericAmount = parseFloat(amountVal.replace(/[^0-9.-]+/g, '')) || 0;
-    const formatted = `=== DATA WD WRONG ===\n` +
-                      `Bank        : ${bank}\n` +
-                      `No. Rekening: ${accountNumber}\n` +
-                      `Userid      : ${username}\n` +
-                      `Nama Rekening: ${fullName}\n` +
-                      `Nominal     : ${formatIDRICOMMA(numericAmount)}`;
+    const colValues = parsedRows
+      .map(row => row[colKey])
+      .filter(val => val !== '' && val !== 'TIDAK TERDETEKSI' && val !== '0');
 
-    navigator.clipboard.writeText(formatted)
+    if (colValues.length === 0) {
+      onToast('info', `Tidak ada data valid di kolom ${friendlyName}.`);
+      return;
+    }
+
+    const textToCopy = colValues.join('\n');
+    navigator.clipboard.writeText(textToCopy)
       .then(() => {
-        onToast('success', 'Rincian data WD Wrong berhasil disalin dalam satu format!');
-        setCopiedField('all_group');
-        setTimeout(() => setCopiedField(null), 2000);
+        onToast('success', `Kolom ${friendlyName} berhasil disalin`);
+        setCopiedColumn(colKey);
+        setTimeout(() => setCopiedColumn(null), 1500);
       })
       .catch(() => {
-        onToast('info', 'Gagal menyalin kelompok format.');
+        onToast('info', 'Gagal menyalin kolom');
       });
   };
 
-  const handleLoadSampleWrong = () => {
-    setInputText(`1\t\tcengbig123\tBiqi Yusa Putra\t354801040957535\tBRI\tLGBDT-GARUDA1902175\t-\t2026-06-22 09:38:31\t-\t105,000.00\twrong\tWithdraw auto request is error!\tResend Move`);
-    onToast('success', 'Contoh data WD Wrong berhasil dimuat');
+  // Bulk Copy Semua Data into specific formatted list: BCA | 1234567890 | USER001 | BUDI SETIAWAN | 50000
+  const handleCopyAllData = () => {
+    if (parsedRows.length === 0) {
+      onToast('info', 'Tabel kosong. Tidak ada data untuk disalin.');
+      return;
+    }
+
+    const formattedList = parsedRows.map(row => {
+      const b = row.bank || '-';
+      const a = row.accountNumber || '-';
+      const u = row.userId || '-';
+      const n = row.accountName || '-';
+      const m = row.nominal || '0';
+      return `${b} | ${a} | ${u} | ${n} | ${m}`;
+    }).join('\n');
+
+    navigator.clipboard.writeText(formattedList)
+      .then(() => {
+        onToast('success', 'Semua data berhasil disalin');
+        setCopiedAll(true);
+        setTimeout(() => setCopiedAll(false), 2000);
+      })
+      .catch(() => {
+        onToast('info', 'Gagal menyalin semua data.');
+      });
   };
 
+  // Clear Spreadsheet & paste state
   const handleClear = () => {
     setInputText('');
-    setBank('');
-    setAccountNumber('');
-    setUsername('');
-    setFullName('');
-    setAmountVal('');
+    setParsedRows([]);
+    onToast('info', 'Data berhasil dibersihkan');
   };
 
-  const hasAnyData = bank || accountNumber || username || fullName || amountVal;
+  // Demo / Import Data with multiple sample wrong rows
+  const handleImportSampleData = () => {
+    const sampleText = 
+      `BCA 1393320684 ujangtidid Andi Hermawan 150000\n` +
+      `BRI 354801040957535 cengbig123 Biqi Yusa Putra 105000\n` +
+      `MANDIRI 1122334455 USER003 ANDI SAPUTRA 75000\n` +
+      `BCA 1234567890 USER001 BUDI SETIAWAN 50000\n` +
+      `BRI 9876543210 USER002 SITI AMINAH 125000`;
+    setInputText(sampleText);
+    onToast('success', 'Contoh data berhasil di-import');
+  };
+
+  // Export fully compliant RFC 4180 CSV
+  const handleExportCSV = () => {
+    if (parsedRows.length === 0) {
+      onToast('info', 'Tabel kosong. Tidak ada data untuk diexport.');
+      return;
+    }
+
+    let csvContent = 'data:text/csv;charset=utf-8,';
+    csvContent += 'Jenis Bank,Nomor Rekening,User ID,Nama Rekening,Nominal\r\n';
+
+    parsedRows.forEach(row => {
+      // Escape commas & quotes
+      const b = `"${row.bank.replace(/"/g, '""')}"`;
+      const a = `"${row.accountNumber.replace(/"/g, '""')}"`;
+      const u = `"${row.userId.replace(/"/g, '""')}"`;
+      const n = `"${row.accountName.replace(/"/g, '""')}"`;
+      const m = `"${row.nominal.replace(/"/g, '""')}"`;
+      csvContent += `${b},${a},${u},${n},${m}\r\n`;
+    });
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `WD_Wrong_Export_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    onToast('success', 'CSV berhasil di-export!');
+  };
 
   return (
-    <div className="glass-card glass-card-hover rounded-2xl p-6 bg-slate-950/40 border-white/10 shadow-[0_0_25px_rgba(239,68,68,0.12)] relative overflow-hidden group">
-      
-      {/* Visual Red accent representation on the background */}
-      <div className="absolute top-0 right-0 h-28 w-28 bg-rose-600/5 rounded-full blur-3xl pointer-events-none group-hover:bg-rose-600/8 transition-colors" />
+    <div 
+      id="wrong-quick-copier-tool"
+      className="rounded-2xl p-6 bg-[#0B1220] border border-[#1E293B] shadow-[0_0_35px_rgba(34,211,238,0.15)] text-slate-100 relative overflow-hidden"
+    >
+      {/* Cyan decorative neon grid accent */}
+      <div className="absolute top-0 right-0 h-36 w-36 bg-[#22D3EE]/5 rounded-full blur-3xl pointer-events-none" />
 
-      {/* Header Title Section */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 border-b border-white/5 pb-3">
-        <div className="flex items-center gap-2">
-          <div className="h-2.5 w-2.5 rounded-full bg-red-500 animate-pulse" />
-          <h3 className="font-display text-xs sm:text-sm font-black text-rose-400 tracking-wider uppercase flex items-center gap-1">
-            ALAT PEMISAH DATA WD WRONG &bull; QUICK COPIER
-          </h3>
+      {/* Header section with brand name and speed indicator */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 pb-4 border-b border-[#1E293B]">
+        <div className="flex items-center gap-3">
+          <div className="h-2.5 w-2.5 rounded-full bg-[#22D3EE] animate-pulse shadow-[0_0_10px_#22D3EE]" />
+          <div>
+            <h3 className="font-display text-sm font-black text-white tracking-widest uppercase flex items-center gap-2">
+              WD WRONG QUICK COPIER &bull; DARK NEON ENGINE
+            </h3>
+            <p className="text-[10px] text-[#22D3EE] font-mono tracking-wider">SPEED: ULTRA FAST (UP TO 1,500 ROWS/SEC)</p>
+          </div>
         </div>
 
-        <button
-          onClick={handleLoadSampleWrong}
-          className="text-[10px] text-red-400 hover:text-red-300 font-extrabold flex items-center gap-1 cursor-pointer transition-all bg-red-500/10 px-2.5 py-1 rounded-lg border border-red-500/20"
-        >
-          <Sparkles className="h-3 w-3 text-red-400" />
-          Coba Paste Contoh Tabular
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleImportSampleData}
+            className="text-[11px] text-[#22D3EE] hover:text-[#22D3EE]/80 font-bold flex items-center gap-1 bg-[#22D3EE]/10 px-3 py-1.5 rounded-xl border border-[#22D3EE]/20 transition-all cursor-pointer"
+          >
+            <Upload className="h-3 w-3" />
+            📥 Import Data
+          </button>
+          
+          <button
+            onClick={handleExportCSV}
+            className="text-[11px] text-emerald-400 hover:text-emerald-300 font-bold flex items-center gap-1 bg-emerald-500/10 px-3 py-1.5 rounded-xl border border-emerald-500/20 transition-all cursor-pointer"
+          >
+            <Download className="h-3 w-3" />
+            📤 Export CSV
+          </button>
+        </div>
       </div>
 
-      {/* Main Single Paste Text Area */}
+      {/* Raw input textarea */}
       <div className="relative">
         <textarea
-          id="raw-wrong-data"
+          id="raw-wrong-paste-area"
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
-          placeholder="Tempel data WD Wrong satu baris di sini... (sekali tempel langsung memisahkan ke 5 kolom di bawah)"
-          className="w-full min-h-[75px] rounded-xl border border-white/10 p-3.5 text-xs font-mono bg-slate-900/60 hover:bg-slate-900/85 focus:bg-slate-950 text-slate-100 placeholder:text-slate-500 transition-all leading-normal outline-none focus:ring-2 focus:ring-rose-500/40 focus:border-rose-400"
+          placeholder="Tempel data WD Wrong di sini... (Support tab, spasi ganda, enter berlebih, & 1000+ baris sekaligus)"
+          className="w-full min-h-[100px] rounded-xl border border-[#1E293B] p-4 text-xs font-mono bg-[#070b14] hover:bg-[#0b1221] focus:bg-[#020408] text-cyan-100 placeholder:text-slate-600 transition-all leading-relaxed outline-none focus:ring-2 focus:ring-[#22D3EE]/40 focus:border-[#22D3EE]"
         />
         {inputText && (
           <button
             onClick={handleClear}
-            className="absolute right-3.5 bottom-3 text-slate-400 hover:text-rose-400 transition-colors h-6 w-6 rounded flex items-center justify-center bg-slate-950/80 border border-white/5 hover:border-rose-500/20"
-            title="Bersihkan Semua Input"
+            className="absolute right-4 bottom-4 text-slate-400 hover:text-rose-400 transition-colors h-7 w-7 rounded-lg flex items-center justify-center bg-slate-900 border border-[#1E293B] hover:border-rose-500/20"
+            title="Bersihkan Semua"
           >
-            <Trash2 className="h-3.5 w-3.5" />
+            <Trash2 className="h-4 w-4" />
           </button>
         )}
       </div>
 
-      {/* The 5 Columns / Inputs Fields Section (Always visible for cleaner structure) */}
-      <div className="mt-5 space-y-4">
-        
-        <div className="flex items-center justify-between bg-rose-500/5 border border-rose-500/20 rounded-xl px-3 py-2 text-[10px] text-rose-300/90 leading-tight">
-          <div className="flex items-center gap-1.5">
-            <CornerDownRight className="h-3.5 w-3.5 text-rose-400 shrink-0" />
-            <span><strong>FITUR SHORTCUT COPIER:</strong> Klik atau salin langsung di masing-masing kolom input di bawah ini. Nilai dapat diedit manual jika diinginkan.</span>
-          </div>
+      {/* Helpful tip row */}
+      <div className="mt-4 flex flex-col md:flex-row md:items-center justify-between gap-3 bg-[#22D3EE]/5 border border-[#22D3EE]/20 rounded-xl px-4 py-2.5 text-[11px] text-[#22D3EE]">
+        <div className="flex items-center gap-2">
+          <CornerDownRight className="h-4 w-4 text-[#22D3EE] shrink-0" />
+          <span><strong>FITUR INSTANT COPY:</strong> Klik pada sel mana saja di tabel untuk menyalin nilai secara cepat.</span>
+        </div>
+        <div className="flex items-center gap-1.5 font-bold">
+          <Sparkles className="h-3.5 w-3.5 text-yellow-400 shrink-0" />
+          <span>Klik tombol <Copy className="h-2.5 w-2.5 inline" /> di header kolom untuk menyalin seluruh isi vertikal!</span>
+        </div>
+      </div>
+
+      {/* Infinite/Fast parsed results grid layout */}
+      <div className="mt-5 border border-[#1E293B] rounded-xl overflow-hidden shadow-2xl bg-[#070b14]">
+        <div className="max-h-[360px] overflow-y-auto overflow-x-auto">
+          <table className="w-full table-fixed min-w-[850px] border-collapse select-none">
+            {/* Columns structure: equal 20% width as requested */}
+            <colgroup>
+              <col className="w-1/5" />
+              <col className="w-1/5" />
+              <col className="w-1/5" />
+              <col className="w-1/5" />
+              <col className="w-1/5" />
+            </colgroup>
+
+            {/* Sticky headers with bulk copy features */}
+            <thead className="sticky top-0 bg-[#0B1220] z-10 border-b border-[#1E293B]">
+              <tr>
+                {/* Kolom 1 Header */}
+                <th className="py-3 px-4 text-[11px] font-black text-slate-300 tracking-wider text-center uppercase border-r border-[#1E293B]">
+                  <button
+                    onClick={() => handleCopyColumn('bank', 'Jenis Bank')}
+                    className="inline-flex items-center gap-1.5 hover:text-[#22D3EE] transition-all cursor-pointer font-bold mx-auto bg-slate-900/40 hover:bg-slate-900 px-2.5 py-1 rounded border border-[#1E293B]"
+                    title="Salin Kolom Jenis Bank"
+                  >
+                    <Copy className="h-3 w-3 text-[#22D3EE]" />
+                    JENIS BANK
+                  </button>
+                </th>
+
+                {/* Kolom 2 Header */}
+                <th className="py-3 px-4 text-[11px] font-black text-slate-300 tracking-wider text-center uppercase border-r border-[#1E293B]">
+                  <button
+                    onClick={() => handleCopyColumn('accountNumber', 'Nomor Rekening')}
+                    className="inline-flex items-center gap-1.5 hover:text-[#22D3EE] transition-all cursor-pointer font-bold mx-auto bg-slate-900/40 hover:bg-slate-900 px-2.5 py-1 rounded border border-[#1E293B]"
+                    title="Salin Kolom No Rekening"
+                  >
+                    <Copy className="h-3 w-3 text-[#22D3EE]" />
+                    NO. REKENING
+                  </button>
+                </th>
+
+                {/* Kolom 3 Header */}
+                <th className="py-3 px-4 text-[11px] font-black text-slate-300 tracking-wider text-center uppercase border-r border-[#1E293B]">
+                  <button
+                    onClick={() => handleCopyColumn('userId', 'User ID')}
+                    className="inline-flex items-center gap-1.5 hover:text-[#22D3EE] transition-all cursor-pointer font-bold mx-auto bg-slate-900/40 hover:bg-slate-900 px-2.5 py-1 rounded border border-[#1E293B]"
+                    title="Salin Kolom User ID"
+                  >
+                    <Copy className="h-3 w-3 text-[#22D3EE]" />
+                    USER ID
+                  </button>
+                </th>
+
+                {/* Kolom 4 Header */}
+                <th className="py-3 px-4 text-[11px] font-black text-slate-300 tracking-wider text-center uppercase border-r border-[#1E293B]">
+                  <button
+                    onClick={() => handleCopyColumn('accountName', 'Nama Rekening')}
+                    className="inline-flex items-center gap-1.5 hover:text-[#22D3EE] transition-all cursor-pointer font-bold mx-auto bg-slate-900/40 hover:bg-slate-900 px-2.5 py-1 rounded border border-[#1E293B]"
+                    title="Salin Kolom Nama Rekening"
+                  >
+                    <Copy className="h-3 w-3 text-[#22D3EE]" />
+                    NAMA REKENING
+                  </button>
+                </th>
+
+                {/* Kolom 5 Header */}
+                <th className="py-3 px-4 text-[11px] font-black text-slate-300 tracking-wider text-center uppercase">
+                  <button
+                    onClick={() => handleCopyColumn('nominal', 'Nominal')}
+                    className="inline-flex items-center gap-1.5 hover:text-[#22D3EE] transition-all cursor-pointer font-bold mx-auto bg-slate-900/40 hover:bg-slate-900 px-2.5 py-1 rounded border border-[#1E293B]"
+                    title="Salin Kolom Nominal"
+                  >
+                    <Copy className="h-3 w-3 text-[#22D3EE]" />
+                    NOMINAL
+                  </button>
+                </th>
+              </tr>
+            </thead>
+
+            {/* Parsed list output */}
+            <tbody className="divide-y divide-[#1E293B]">
+              {parsedRows.length > 0 ? (
+                parsedRows.map((row, rIdx) => (
+                  <tr key={rIdx} className="h-11 hover:bg-[#22D3EE]/5 transition-all">
+                    
+                    {/* Bank Column */}
+                    <td className="p-0 border-r border-[#1E293B] relative">
+                      <div className="flex items-center justify-center h-full w-full">
+                        {row.bank !== 'TIDAK TERDETEKSI' ? (
+                          <button
+                            onClick={() => handleCellClickAndCopy(rIdx, 0, row.bank)}
+                            className="bg-blue-900/80 hover:bg-blue-800 text-white text-[10px] font-black text-center px-3.5 py-1 rounded-full uppercase tracking-wider transition-all shadow border border-blue-700/50 cursor-pointer"
+                          >
+                            {row.bank}
+                          </button>
+                        ) : (
+                          <span className="text-slate-600 text-xs">-</span>
+                        )}
+                      </div>
+                      {copiedCell?.row === rIdx && copiedCell?.col === 0 && (
+                        <span className="absolute top-1 right-2 bg-emerald-500 text-white text-[8px] font-bold px-1 rounded animate-pulse">Copied</span>
+                      )}
+                    </td>
+
+                    {/* No Rekening Column */}
+                    <td className="p-0 border-r border-[#1E293B] relative">
+                      <div 
+                        onClick={() => handleCellClickAndCopy(rIdx, 1, row.accountNumber)}
+                        className="h-full w-full flex items-center justify-center font-mono font-bold text-xs text-[#22D3EE] hover:bg-white/[0.03] transition-all cursor-pointer px-2 text-center"
+                      >
+                        {row.accountNumber}
+                      </div>
+                      {copiedCell?.row === rIdx && copiedCell?.col === 1 && (
+                        <span className="absolute top-1 right-2 bg-emerald-500 text-white text-[8px] font-bold px-1 rounded animate-pulse">Copied</span>
+                      )}
+                    </td>
+
+                    {/* User ID Column */}
+                    <td className="p-0 border-r border-[#1E293B] relative">
+                      <div 
+                        onClick={() => handleCellClickAndCopy(rIdx, 2, row.userId)}
+                        className="h-full w-full flex items-center justify-center font-mono font-bold text-xs text-rose-400 hover:bg-white/[0.03] transition-all cursor-pointer px-2 text-center"
+                      >
+                        {row.userId}
+                      </div>
+                      {copiedCell?.row === rIdx && copiedCell?.col === 2 && (
+                        <span className="absolute top-1 right-2 bg-emerald-500 text-white text-[8px] font-bold px-1 rounded animate-pulse">Copied</span>
+                      )}
+                    </td>
+
+                    {/* Nama Rekening Column */}
+                    <td className="p-0 border-r border-[#1E293B] relative">
+                      <div 
+                        onClick={() => handleCellClickAndCopy(rIdx, 3, row.accountName)}
+                        className="h-full w-full flex items-center justify-center font-sans font-extrabold text-xs text-slate-100 hover:bg-white/[0.03] transition-all cursor-pointer px-3 text-center truncate"
+                      >
+                        {row.accountName}
+                      </div>
+                      {copiedCell?.row === rIdx && copiedCell?.col === 3 && (
+                        <span className="absolute top-1 right-2 bg-emerald-500 text-white text-[8px] font-bold px-1 rounded animate-pulse">Copied</span>
+                      )}
+                    </td>
+
+                    {/* Nominal Column */}
+                    <td className="p-0 relative">
+                      <div 
+                        onClick={() => handleCellClickAndCopy(rIdx, 4, row.nominal)}
+                        className="h-full w-full flex items-center justify-center font-mono font-black text-xs text-emerald-400 hover:bg-white/[0.03] transition-all cursor-pointer px-4 text-center"
+                      >
+                        {row.nominal !== '0' ? Number(row.nominal).toLocaleString('en-US') : '-'}
+                      </div>
+                      {copiedCell?.row === rIdx && copiedCell?.col === 4 && (
+                        <span className="absolute top-1 right-2 bg-emerald-500 text-white text-[8px] font-bold px-1 rounded animate-pulse">Copied</span>
+                      )}
+                    </td>
+
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={5} className="py-12 text-center text-slate-500 text-xs font-mono">
+                    <AlertCircle className="h-5 w-5 text-slate-600 mx-auto mb-2 animate-bounce" />
+                    Belum ada data. Silakan ketik atau paste baris data mentah di atas.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Footer statistics & group bulk action buttons */}
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 mt-4 pt-4 border-t border-[#1E293B]">
+        <div className="text-[10px] text-slate-400 flex items-center gap-1.5 font-mono">
+          <Info className="h-4 w-4 text-[#22D3EE] shrink-0" />
+          <span>Total: <strong className="text-[#22D3EE]">{parsedRows.length}</strong> baris berhasil dipecah.</span>
         </div>
 
-        {/* 5 columns layout */}
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-3.5">
-          
-          {/* Kolom 1: Jenis Bank */}
-          <div className="relative border border-white/5 hover:border-blue-500/25 bg-slate-900/35 rounded-xl p-3 pt-2.5 transition-all flex flex-col gap-1.5">
-            <label className="text-[10px] text-slate-400 font-black uppercase tracking-wider flex items-center justify-between">
-              <span className="flex items-center gap-1">
-                <Landmark className="h-3 w-3 text-blue-400" />
-                1. Jenis Bank
-              </span>
-              {bank && bank !== 'TIDAK TERDETEKSI' && (
-                <span className="text-[8px] text-blue-400 font-bold">Auto-Copy On Click</span>
-              )}
-            </label>
-            <div className="relative flex items-center mt-1">
-              <input
-                ref={bankRef}
-                type="text"
-                value={bank}
-                onChange={(e) => setBank(e.target.value)}
-                onFocus={(e) => handleInputFocusSelect(e, 'Jenis Bank', bank)}
-                placeholder="cth. BRI/BCA"
-                className="w-full bg-slate-950/85 text-xs font-mono font-extrabold text-blue-300 pr-8 pl-2.5 py-2 rounded-lg border border-white/5 focus:border-blue-500 outline-none text-center uppercase"
-              />
-              <button
-                onClick={() => handleCopyValue(bank, 'Jenis Bank')}
-                className="absolute right-1.5 p-1 rounded hover:bg-white/5 text-slate-400 hover:text-blue-400 transition-colors"
-                title="Salin Bank"
-              >
-                {copiedField === 'Jenis Bank' ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
-              </button>
-            </div>
-          </div>
+        <div className="flex items-center gap-2.5 w-full sm:w-auto justify-end">
+          <button
+            onClick={handleClear}
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl text-xs font-bold text-slate-400 hover:text-rose-400 bg-slate-900 border border-[#1E293B] hover:border-rose-500/20 px-4 py-2.5 transition-all cursor-pointer"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            🗑 Bersihkan Data
+          </button>
 
-          {/* Kolom 2: Nomor Rekening */}
-          <div className="relative border border-white/5 hover:border-emerald-500/25 bg-slate-900/35 rounded-xl p-3 pt-2.5 transition-all flex flex-col gap-1.5">
-            <label className="text-[10px] text-slate-400 font-black uppercase tracking-wider flex items-center justify-between">
-              <span className="flex items-center gap-1">
-                <CreditCard className="h-3 w-3 text-emerald-400" />
-                2. No. Rekening
-              </span>
-              {accountNumber && accountNumber !== 'TIDAK TERDETEKSI' && (
-                <span className="text-[8px] text-emerald-400 font-bold">Auto-Copy On Click</span>
-              )}
-            </label>
-            <div className="relative flex items-center mt-1">
-              <input
-                ref={accNumRef}
-                type="text"
-                value={accountNumber}
-                onChange={(e) => setAccountNumber(e.target.value)}
-                onFocus={(e) => handleInputFocusSelect(e, 'Nomor Rekening', accountNumber)}
-                placeholder="Nomor rekening"
-                className="w-full bg-slate-950/85 text-xs font-mono font-extrabold text-emerald-400 pr-8 pl-2.5 py-2 rounded-lg border border-white/5 focus:border-emerald-500 outline-none"
-              />
-              <button
-                onClick={() => handleCopyValue(accountNumber, 'Nomor Rekening')}
-                className="absolute right-1.5 p-1 rounded hover:bg-white/5 text-slate-400 hover:text-emerald-400 transition-colors"
-                title="Salin No Rekening"
-              >
-                {copiedField === 'Nomor Rekening' ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
-              </button>
-            </div>
-          </div>
-
-          {/* Kolom 3: User ID */}
-          <div className="relative border border-white/5 hover:border-amber-500/25 bg-slate-900/35 rounded-xl p-3 pt-2.5 transition-all flex flex-col gap-1.5">
-            <label className="text-[10px] text-slate-400 font-black uppercase tracking-wider flex items-center justify-between">
-              <span className="flex items-center gap-1">
-                <User className="h-3 w-3 text-amber-400" />
-                3. User ID
-              </span>
-              {username && username !== 'TIDAK TERDETEKSI' && (
-                <span className="text-[8px] text-amber-500 font-bold">Auto-Copy On Click</span>
-              )}
-            </label>
-            <div className="relative flex items-center mt-1">
-              <input
-                ref={userRef}
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                onFocus={(e) => handleInputFocusSelect(e, 'User ID', username)}
-                placeholder="ID member"
-                className="w-full bg-slate-950/85 text-xs font-mono font-extrabold text-amber-300 pr-8 pl-2.5 py-2 rounded-lg border border-white/5 focus:border-amber-500 outline-none"
-              />
-              <button
-                onClick={() => handleCopyValue(username, 'User ID')}
-                className="absolute right-1.5 p-1 rounded hover:bg-white/5 text-slate-400 hover:text-amber-500 transition-colors"
-                title="Salin User ID"
-              >
-                {copiedField === 'User ID' ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
-              </button>
-            </div>
-          </div>
-
-          {/* Kolom 4: Nama Rekening */}
-          <div className="relative border border-white/5 hover:border-purple-500/25 bg-slate-900/35 rounded-xl p-3 pt-2.5 transition-all flex flex-col gap-1.5">
-            <label className="text-[10px] text-slate-400 font-black uppercase tracking-wider flex items-center justify-between">
-              <span className="flex items-center gap-1">
-                <Users className="h-3 w-3 text-purple-400" />
-                4. Nama Rekening
-              </span>
-              {fullName && fullName !== 'TIDAK TERDETEKSI' && (
-                <span className="text-[8px] text-purple-400 font-bold">Auto-Copy On Click</span>
-              )}
-            </label>
-            <div className="relative flex items-center mt-1">
-              <input
-                ref={nameRef}
-                type="text"
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-                onFocus={(e) => handleInputFocusSelect(e, 'Nama Rekening', fullName)}
-                placeholder="Nama pemilik rekening"
-                className="w-full bg-slate-950/85 text-xs font-sans font-extrabold text-purple-300 pr-8 pl-2.5 py-2 rounded-lg border border-white/5 focus:border-purple-500 outline-none"
-              />
-              <button
-                onClick={() => handleCopyValue(fullName, 'Nama Rekening')}
-                className="absolute right-1.5 p-1 rounded hover:bg-white/5 text-slate-400 hover:text-purple-400 transition-colors"
-                title="Salin Nama Rekening"
-              >
-                {copiedField === 'Nama Rekening' ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
-              </button>
-            </div>
-          </div>
-
-          {/* Kolom 5: Nominal WD */}
-          <div className="relative border border-white/5 hover:border-rose-500/25 bg-slate-900/35 rounded-xl p-3 pt-2.5 transition-all flex flex-col gap-1.5">
-            <label className="text-[10px] text-slate-400 font-black uppercase tracking-wider flex items-center justify-between">
-              <span className="flex items-center gap-1">
-                <DollarSign className="h-3 w-3 text-rose-400" />
-                5. Nominal (Rp)
-              </span>
-              {amountVal && amountVal !== '0' && (
-                <span className="text-[8px] text-rose-400 font-bold font-mono">{formatIDRICOMMA(Number(amountVal))}</span>
-              )}
-            </label>
-            <div className="relative flex items-center mt-1">
-              <input
-                ref={amountRef}
-                type="text"
-                value={amountVal}
-                onChange={(e) => setAmountVal(e.target.value)}
-                onFocus={(e) => handleInputFocusSelect(e, 'Nominal', amountVal)}
-                placeholder="Nominal Penarikan"
-                className="w-full bg-slate-950/85 text-xs font-mono font-extrabold text-rose-400 pr-16 pl-2.5 py-2 rounded-lg border border-white/5 focus:border-rose-500 outline-none"
-              />
-              <div className="absolute right-1.5 flex items-center gap-0.5">
-                <button
-                  onClick={() => handleCopyValue(amountVal, 'Nominal')}
-                  className="p-1 rounded hover:bg-white/5 text-slate-400 hover:text-rose-400 transition-colors"
-                  title="Salin Nominal Bersih"
-                >
-                  {copiedField === 'Nominal' ? <Check className="h-2.5 w-2.5 text-emerald-400" /> : <Copy className="h-2.5 w-2.5" />}
-                </button>
-                <button
-                  onClick={() => handleCopyValue(formatIDRICOMMA(Number(amountVal)), 'Format Uang')}
-                  className="px-1 text-[8px] bg-rose-500/10 hover:bg-rose-500 hover:text-white text-rose-400 rounded py-1 transition-all"
-                  title="Salin Format Rp"
-                >
-                  Rp
-                </button>
-              </div>
-            </div>
-          </div>
-
+          <button
+            onClick={handleCopyAllData}
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl text-xs font-black text-[#0B1220] bg-[#22D3EE] hover:bg-[#22D3EE]/95 px-6 py-2.5 cursor-pointer transition-all shadow-[0_0_15px_rgba(34,211,238,0.3)] hover:scale-[1.02]"
+          >
+            <ClipboardCheck className="h-4 w-4" />
+            {copiedAll ? 'Tersalin!' : '📋 Copy Semua Data'}
+          </button>
         </div>
-
-        {/* Action Button: Group formatting structured copiers */}
-        {hasAnyData && (
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 border-t border-white/5">
-            <div className="text-[10px] text-slate-500 flex items-center gap-1">
-              <Info className="h-3.5 w-3.5 text-rose-500/70" />
-              <span>Semua nilai bersifat dinamis. Anda bisa mengganti data kolom di atas kapan saja secara manual.</span>
-            </div>
-            
-            <button
-              onClick={handleCopyFormattedGroup}
-              className="inline-flex items-center gap-1.5 rounded-xl text-xs font-black text-white bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-650 px-5.5 py-2 cursor-pointer transition-all shadow-md hover:shadow-red-500/10 shrink-0 w-full sm:w-auto justify-center"
-            >
-              <ClipboardCheck className="h-4 w-4" />
-              {copiedField === 'all_group' ? 'Segrup Terformat Tersalin!' : 'Copy Semua Terstruktur (1 Format Group)'}
-            </button>
-          </div>
-        )}
-
       </div>
 
     </div>
